@@ -76,6 +76,7 @@ static bool gWantTristarDFU = false;
 
 #define DFU_WAKE_RETRY_INTERVAL_US (500 * USEC_PER_MSEC)
 #define DFU_WAKE_RETRY_TIMEOUT_US  (15 * USEC_PER_SEC)
+#define POLARITY_SCRATCH_MAGIC      0x434f4c00u
 
 static bool gDFURetryActive = false;
 static uint64_t gDFURetryDeadline = 0;
@@ -325,17 +326,14 @@ void colobus_perform_wake(){
 }
 
 void colobus_set_polarity(bool inverted){
-    int oldPin = PIN_SDQ_INVERTED(gCableIsInverted);
-
-    gDFURetryActive = false;
-    gWantTristarReset = false;
-    gWantTristarDFU = false;
-    lightning_cleanup();
-    gpio_init(oldPin);
-    gpio_set_dir(oldPin, GPIO_IN);
-    gCableIsInverted = inverted;
-    lightning_init(PIN_SDQ_INVERTED(gCableIsInverted));
-    colobus_perform_wake();
+    watchdog_hw->scratch[0] = POLARITY_SCRATCH_MAGIC | (inverted ? 1u : 0u);
+    tud_cdc_n_write_str(ITF_CONTROL, inverted ? "[lightning] rebooting with polarity 1 (GPIO 3)\r\n"
+                                              : "[lightning] rebooting with polarity 0 (GPIO 2)\r\n");
+    tud_cdc_n_write_flush(ITF_CONTROL);
+    tud_task();
+    sleep_ms(100);
+    watchdog_reboot(0,0,0);
+    while (true) tight_loop_contents();
 }
 
 void colobus_begin_dfu(){
@@ -566,8 +564,6 @@ void myusb_task(){
       if (!strcmp(line, "polarity0")) inverted = false;
       if (!strcmp(line, "polarity1")) inverted = true;
       colobus_set_polarity(inverted);
-      tud_cdc_n_write_str(ITF_CONTROL, inverted ? "[lightning] polarity 1 (GPIO 3)\r\n"
-                                                : "[lightning] polarity 0 (GPIO 2)\r\n");
     } else if (!strcmp(line, "rb")){
       watchdog_reboot(0,0,0);
     } else if (!strcmp(line, "bl")){
@@ -668,7 +664,12 @@ int main(){
 
     init_led();
 
-    gCableIsInverted = button_get_edge(PIN_BUTTON1);
+    uint32_t polarityScratch = watchdog_hw->scratch[0];
+    if ((polarityScratch & ~1u) == POLARITY_SCRATCH_MAGIC){
+        gCableIsInverted = polarityScratch & 1u;
+    }else{
+        gCableIsInverted = button_get_edge(PIN_BUTTON1);
+    }
 
     bool isKisMode = false;
     if (button_get_edge(PIN_BUTTON2)){
