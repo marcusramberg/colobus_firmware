@@ -324,6 +324,20 @@ void colobus_perform_wake(){
     gColobusWantsWake = true;
 }
 
+void colobus_set_polarity(bool inverted){
+    int oldPin = PIN_SDQ_INVERTED(gCableIsInverted);
+
+    gDFURetryActive = false;
+    gWantTristarReset = false;
+    gWantTristarDFU = false;
+    lightning_cleanup();
+    gpio_init(oldPin);
+    gpio_set_dir(oldPin, GPIO_IN);
+    gCableIsInverted = inverted;
+    lightning_init(PIN_SDQ_INVERTED(gCableIsInverted));
+    colobus_perform_wake();
+}
+
 void colobus_begin_dfu(){
     uint64_t now = time_us_64();
     gWantTristarReset = true;
@@ -547,6 +561,13 @@ void myusb_task(){
     } else if (!strcmp(line, "dfu")){
       tud_cdc_n_write_str(ITF_CONTROL, "entering DFU!\r\n");
       colobus_begin_dfu();
+    } else if (!strcmp(line, "polarity") || !strcmp(line, "polarity0") || !strcmp(line, "polarity1")){
+      bool inverted = !gCableIsInverted;
+      if (!strcmp(line, "polarity0")) inverted = false;
+      if (!strcmp(line, "polarity1")) inverted = true;
+      colobus_set_polarity(inverted);
+      tud_cdc_n_write_str(ITF_CONTROL, inverted ? "[lightning] polarity 1 (GPIO 3)\r\n"
+                                                : "[lightning] polarity 0 (GPIO 2)\r\n");
     } else if (!strcmp(line, "rb")){
       watchdog_reboot(0,0,0);
     } else if (!strcmp(line, "bl")){
