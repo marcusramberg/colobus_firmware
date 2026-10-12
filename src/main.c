@@ -483,10 +483,14 @@ void task_swd(){
     gIsSWDTaskActive = false;
 }
 
-void colobus_perform_usbliter8(){
+void colobus_start_usbliter8(){
   usbmux_configure(kMuxcfg_iphone_to_gpio);
   usb_task_queue_cmd(USB_CMD_WAIT_FOR_DEVICE);
   gUSBLiter8Connected = 1;
+}
+
+void colobus_perform_usbliter8(){
+  colobus_start_usbliter8();
   colobus_begin_dfu();
 }
 
@@ -556,6 +560,9 @@ void myusb_task(){
     } else if (!strcmp(line, "usbliter8")){
       tud_cdc_n_write_str(ITF_CONTROL, "entering DFU with exploit!\r\n");
       colobus_perform_usbliter8();
+    } else if (!strcmp(line, "usbliter8only")){
+      tud_cdc_n_write_str(ITF_CONTROL, "attaching usbliter8 to existing DFU device!\r\n");
+      colobus_start_usbliter8();
     } else if (!strcmp(line, "dfu")){
       tud_cdc_n_write_str(ITF_CONTROL, "entering DFU!\r\n");
       colobus_begin_dfu();
@@ -564,6 +571,15 @@ void myusb_task(){
       if (!strcmp(line, "polarity0")) inverted = false;
       if (!strcmp(line, "polarity1")) inverted = true;
       colobus_set_polarity(inverted);
+    } else if (!strcmp(line, "muxdc")){
+      usbmux_configure(kMuxcfg_iphone_disconnected);
+      tud_cdc_n_write_str(ITF_CONTROL, "muxing to: disconnected\r\n");
+    } else if (!strcmp(line, "muxhub")){
+      usbmux_configure(kMuxcfg_iphone_to_hub);
+      tud_cdc_n_write_str(ITF_CONTROL, "muxing to: hub\r\n");
+    } else if (!strcmp(line, "muxgpio")){
+      usbmux_configure(kMuxcfg_iphone_to_gpio);
+      tud_cdc_n_write_str(ITF_CONTROL, "muxing to: gpio\r\n");
     } else if (!strcmp(line, "rb")){
       watchdog_reboot(0,0,0);
     } else if (!strcmp(line, "bl")){

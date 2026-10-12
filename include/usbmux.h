@@ -3,6 +3,8 @@
 
 #define USBMUX_SEL0  24
 #define USBMUX_SEL1  25
+#define USBMUX_ALT_SEL0  21
+#define USBMUX_ALT_SEL1  20
 
 enum Muxcfg{
   kMuxcfg_iphone_disconnected = 0,
