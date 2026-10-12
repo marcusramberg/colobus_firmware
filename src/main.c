@@ -82,6 +82,7 @@ static bool gWantTristarDFU = false;
 static bool gDFURetryActive = false;
 static uint64_t gDFURetryDeadline = 0;
 static uint64_t gNextDFUWakeTime = 0;
+static uint32_t gDFUWakeRetries = 0;
 static volatile uint32_t gTristarResetResponses = 0;
 static volatile uint32_t gTristarDFUResponses = 0;
 
@@ -343,6 +344,7 @@ void colobus_begin_dfu(){
     gWantTristarReset = true;
     gWantTristarDFU = true;
     gDFURetryActive = true;
+    gDFUWakeRetries = 0;
     gDFURetryDeadline = now + DFU_WAKE_RETRY_TIMEOUT_US;
     gNextDFUWakeTime = now + DFU_WAKE_RETRY_INTERVAL_US;
     colobus_perform_wake();
@@ -354,23 +356,30 @@ static bool colobus_auto_dfu_pending(void){
 
 void colobus_begin_auto_dfu(){
     watchdog_hw->scratch[1] = AUTO_DFU_SCRATCH_MAGIC;
+    if (!gCableIsInverted){
+        watchdog_hw->scratch[0] = POLARITY_SCRATCH_MAGIC | 1u;
+        tud_cdc_n_write_str(ITF_CONTROL,
+                            "[dfu] rebooting to preferred polarity 1; DFU will resume automatically\r\n");
+        tud_cdc_n_write_flush(ITF_CONTROL);
+        tud_task();
+        sleep_ms(100);
+        watchdog_reboot(0,0,0);
+        while (true) tight_loop_contents();
+    }
     tud_cdc_n_write_str(ITF_CONTROL,
-                        gCableIsInverted
-                            ? "[dfu] automatic DFU starting with polarity 1\r\n"
-                            : "[dfu] automatic DFU starting with polarity 0\r\n");
+                        "[dfu] automatic DFU starting with preferred polarity 1\r\n");
     colobus_begin_dfu();
 }
 
 void colobus_dfu_retry_task(){
     static uint32_t reportedResetResponses = 0;
     static uint32_t reportedDFUResponses = 0;
-    static uint32_t wakeRetries = 0;
     uint64_t now = time_us_64();
     char buf[0x100] = {};
 
     if (reportedResetResponses != gTristarResetResponses){
         reportedResetResponses = gTristarResetResponses;
-        wakeRetries = 0;
+        gDFUWakeRetries = 0;
         snprintf(buf, sizeof(buf), "[dfu] sent RESET response (%lu); waiting for DFU query\r\n",
                  (unsigned long)reportedResetResponses);
         tud_cdc_n_write_str(ITF_CONTROL, buf);
@@ -407,9 +416,9 @@ void colobus_dfu_retry_task(){
         watchdog_hw->scratch[1] = 0;
         tud_cdc_n_write_str(ITF_CONTROL, "[dfu] timed out on both Lightning polarities\r\n");
     }else if (gDFURetryActive && now >= gNextDFUWakeTime){
-        wakeRetries++;
+        gDFUWakeRetries++;
         snprintf(buf, sizeof(buf), "[dfu] wake retry %lu; waiting for %s response\r\n",
-                 (unsigned long)wakeRetries,
+                 (unsigned long)gDFUWakeRetries,
                  gWantTristarReset ? "RESET" : "DFU");
         tud_cdc_n_write_str(ITF_CONTROL, buf);
         colobus_perform_wake();
@@ -568,9 +577,7 @@ void myusb_task(){
       didRead--;
       continue;
     }
-    tud_cdc_n_write_char(ITF_CONTROL, c);
     line[didRead] = c;
-    tud_cdc_n_write_flush(ITF_CONTROL);
     if (line[didRead] == '\r'){
         didBreak = 1;
     }
@@ -578,9 +585,6 @@ void myusb_task(){
       didBreak = 2;
       break;
     }
-  }
-  if (didBreak == 1){
-    tud_cdc_n_write_char(ITF_CONTROL, '\n');
   }
   while (didRead > 0){
     char c = line[didRead-1];
@@ -638,10 +642,6 @@ void myusb_task(){
       watchdog_reboot(0,0,0);
     } else if (!strcmp(line, "bl")){
       reset_usb_boot(0,0);
-    } else {
-      tud_cdc_n_write_str(ITF_CONTROL, "got unrecognised command: '");
-      tud_cdc_n_write_str(ITF_CONTROL, line);
-      tud_cdc_n_write_str(ITF_CONTROL, "'\r\n");
     }
     didRead = 0;
     memset(line, 0, sizeof(line));
