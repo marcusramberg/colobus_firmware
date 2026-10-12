@@ -489,6 +489,11 @@ void colobus_start_usbliter8(){
   gUSBLiter8Connected = 1;
 }
 
+void colobus_start_usbhost_only(){
+  usb_task_queue_cmd(USB_CMD_WAIT_FOR_DEVICE);
+  gUSBLiter8Connected = 1;
+}
+
 void colobus_perform_usbliter8(){
   colobus_start_usbliter8();
   colobus_begin_dfu();
@@ -563,6 +568,9 @@ void myusb_task(){
     } else if (!strcmp(line, "usbliter8only")){
       tud_cdc_n_write_str(ITF_CONTROL, "attaching usbliter8 to existing DFU device!\r\n");
       colobus_start_usbliter8();
+    } else if (!strcmp(line, "usbhostonly")){
+      tud_cdc_n_write_str(ITF_CONTROL, "starting USB host on current mux route!\r\n");
+      colobus_start_usbhost_only();
     } else if (!strcmp(line, "dfu")){
       tud_cdc_n_write_str(ITF_CONTROL, "entering DFU!\r\n");
       colobus_begin_dfu();
@@ -580,6 +588,18 @@ void myusb_task(){
     } else if (!strcmp(line, "muxgpio")){
       usbmux_configure(kMuxcfg_iphone_to_gpio);
       tud_cdc_n_write_str(ITF_CONTROL, "muxing to: gpio\r\n");
+    } else if ((!strncmp(line, "muxold", 6) || !strncmp(line, "muxnew", 6)) &&
+               strlen(line) == 7 && line[6] >= '0' && line[6] <= '3'){
+      enum Muxcfg cfg = (enum Muxcfg)(line[6] - '0');
+      char buf[0x80] = {};
+      if (!strncmp(line, "muxold", 6)){
+        usbmux_configure_old(cfg);
+        snprintf(buf, sizeof(buf), "mux old pins 24/25 to state %d\r\n", cfg);
+      }else{
+        usbmux_configure_new(cfg);
+        snprintf(buf, sizeof(buf), "mux new pins 21/20 to state %d\r\n", cfg);
+      }
+      tud_cdc_n_write_str(ITF_CONTROL, buf);
     } else if (!strcmp(line, "rb")){
       watchdog_reboot(0,0,0);
     } else if (!strcmp(line, "bl")){

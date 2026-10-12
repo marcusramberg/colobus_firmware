@@ -14,5 +14,7 @@ enum Muxcfg{
 };
 
 void usbmux_configure(enum Muxcfg cfg);
+void usbmux_configure_old(enum Muxcfg cfg);
+void usbmux_configure_new(enum Muxcfg cfg);
 
 #endif // USBMUX_H
