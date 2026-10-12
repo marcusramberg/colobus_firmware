@@ -77,6 +77,7 @@ static bool gWantTristarDFU = false;
 #define DFU_WAKE_RETRY_INTERVAL_US (500 * USEC_PER_MSEC)
 #define DFU_WAKE_RETRY_TIMEOUT_US  (15 * USEC_PER_SEC)
 #define POLARITY_SCRATCH_MAGIC      0x434f4c00u
+#define AUTO_DFU_SCRATCH_MAGIC      0x44465500u
 
 static bool gDFURetryActive = false;
 static uint64_t gDFURetryDeadline = 0;
@@ -326,6 +327,7 @@ void colobus_perform_wake(){
 }
 
 void colobus_set_polarity(bool inverted){
+    watchdog_hw->scratch[1] = 0;
     watchdog_hw->scratch[0] = POLARITY_SCRATCH_MAGIC | (inverted ? 1u : 0u);
     tud_cdc_n_write_str(ITF_CONTROL, inverted ? "[lightning] rebooting with polarity 1 (GPIO 3)\r\n"
                                               : "[lightning] rebooting with polarity 0 (GPIO 2)\r\n");
@@ -344,6 +346,19 @@ void colobus_begin_dfu(){
     gDFURetryDeadline = now + DFU_WAKE_RETRY_TIMEOUT_US;
     gNextDFUWakeTime = now + DFU_WAKE_RETRY_INTERVAL_US;
     colobus_perform_wake();
+}
+
+static bool colobus_auto_dfu_pending(void){
+    return (watchdog_hw->scratch[1] & ~1u) == AUTO_DFU_SCRATCH_MAGIC;
+}
+
+void colobus_begin_auto_dfu(){
+    watchdog_hw->scratch[1] = AUTO_DFU_SCRATCH_MAGIC;
+    tud_cdc_n_write_str(ITF_CONTROL,
+                        gCableIsInverted
+                            ? "[dfu] automatic DFU starting with polarity 1\r\n"
+                            : "[dfu] automatic DFU starting with polarity 0\r\n");
+    colobus_begin_dfu();
 }
 
 void colobus_dfu_retry_task(){
@@ -368,13 +383,29 @@ void colobus_dfu_retry_task(){
                  (unsigned long)reportedDFUResponses);
         tud_cdc_n_write_str(ITF_CONTROL, buf);
         gDFURetryActive = false;
+        watchdog_hw->scratch[1] = 0;
     }
 
     if (gDFURetryActive && now >= gDFURetryDeadline){
-        tud_cdc_n_write_str(ITF_CONTROL, "[dfu] timed out waiting for Tristar query\r\n");
         gWantTristarReset = false;
         gWantTristarDFU = false;
         gDFURetryActive = false;
+        if (colobus_auto_dfu_pending() && !(watchdog_hw->scratch[1] & 1u)){
+            bool inverted = !gCableIsInverted;
+            watchdog_hw->scratch[1] = AUTO_DFU_SCRATCH_MAGIC | 1u;
+            watchdog_hw->scratch[0] = POLARITY_SCRATCH_MAGIC | (inverted ? 1u : 0u);
+            tud_cdc_n_write_str(ITF_CONTROL,
+                                inverted
+                                    ? "[dfu] no response; rebooting and retrying polarity 1\r\n"
+                                    : "[dfu] no response; rebooting and retrying polarity 0\r\n");
+            tud_cdc_n_write_flush(ITF_CONTROL);
+            tud_task();
+            sleep_ms(100);
+            watchdog_reboot(0,0,0);
+            while (true) tight_loop_contents();
+        }
+        watchdog_hw->scratch[1] = 0;
+        tud_cdc_n_write_str(ITF_CONTROL, "[dfu] timed out on both Lightning polarities\r\n");
     }else if (gDFURetryActive && now >= gNextDFUWakeTime){
         wakeRetries++;
         snprintf(buf, sizeof(buf), "[dfu] wake retry %lu; waiting for %s response\r\n",
@@ -574,6 +605,9 @@ void myusb_task(){
     } else if (!strcmp(line, "dfu")){
       tud_cdc_n_write_str(ITF_CONTROL, "entering DFU!\r\n");
       colobus_begin_dfu();
+    } else if (!strcmp(line, "dfuauto")){
+      tud_cdc_n_write_str(ITF_CONTROL, "entering DFU with automatic polarity fallback!\r\n");
+      colobus_begin_auto_dfu();
     } else if (!strcmp(line, "polarity") || !strcmp(line, "polarity0") || !strcmp(line, "polarity1")){
       bool inverted = !gCableIsInverted;
       if (!strcmp(line, "polarity0")) inverted = false;
@@ -720,6 +754,11 @@ int main(){
     usb_start();
     usb_bus_init();
 
+    if (colobus_auto_dfu_pending()){
+      tud_cdc_n_write_str(ITF_CONTROL, "[dfu] resuming automatic DFU after polarity reboot\r\n");
+      colobus_begin_dfu();
+    }
+
     while (1){
         {
           //Boot message
@@ -754,7 +793,7 @@ int main(){
                     gWantTristarDFU = false;
                     gDFURetryActive = false;
                 }else{
-                    colobus_begin_dfu();
+                    colobus_begin_auto_dfu();
                 }
             }        
         }
