@@ -74,6 +74,15 @@ static t_colobus_mode gActiveMode = kCOLOBUS_MODE_DEFAULT;
 static bool gWantTristarReset = false;
 static bool gWantTristarDFU = false;
 
+#define DFU_WAKE_RETRY_INTERVAL_US (500 * USEC_PER_MSEC)
+#define DFU_WAKE_RETRY_TIMEOUT_US  (15 * USEC_PER_SEC)
+
+static bool gDFURetryActive = false;
+static uint64_t gDFURetryDeadline = 0;
+static uint64_t gNextDFUWakeTime = 0;
+static volatile uint32_t gTristarResetResponses = 0;
+static volatile uint32_t gTristarDFUResponses = 0;
+
 static uint64_t gWantSWDInitTime = 0;
 static uint64_t gLastLightningCheckin = 0;
 static uint32_t gSpamFails = 0;
@@ -126,8 +135,10 @@ void lightning_callback(const void *buf, size_t bufSize){
 
         if (gWantTristarReset){
             lightning_write_blocking(colobus_cable_type_responses[kCOLOBUS_MODE_RESET], sizeof(colobus_cable_type_responses[kCOLOBUS_MODE_RESET]));
+            gTristarResetResponses++;
         }else if (gWantTristarDFU){
             lightning_write_blocking(colobus_cable_type_responses[kCOLOBUS_MODE_DFU], sizeof(colobus_cable_type_responses[kCOLOBUS_MODE_DFU]));
+            gTristarDFUResponses++;
         }else{
             lightning_write_blocking(colobus_cable_type_responses[gActiveMode], sizeof(colobus_cable_type_responses[gActiveMode]));
 
@@ -313,6 +324,58 @@ void colobus_perform_wake(){
     gColobusWantsWake = true;
 }
 
+void colobus_begin_dfu(){
+    uint64_t now = time_us_64();
+    gWantTristarReset = true;
+    gWantTristarDFU = true;
+    gDFURetryActive = true;
+    gDFURetryDeadline = now + DFU_WAKE_RETRY_TIMEOUT_US;
+    gNextDFUWakeTime = now + DFU_WAKE_RETRY_INTERVAL_US;
+    colobus_perform_wake();
+}
+
+void colobus_dfu_retry_task(){
+    static uint32_t reportedResetResponses = 0;
+    static uint32_t reportedDFUResponses = 0;
+    static uint32_t wakeRetries = 0;
+    uint64_t now = time_us_64();
+    char buf[0x100] = {};
+
+    if (reportedResetResponses != gTristarResetResponses){
+        reportedResetResponses = gTristarResetResponses;
+        wakeRetries = 0;
+        snprintf(buf, sizeof(buf), "[dfu] sent RESET response (%lu); waiting for DFU query\r\n",
+                 (unsigned long)reportedResetResponses);
+        tud_cdc_n_write_str(ITF_CONTROL, buf);
+        gNextDFUWakeTime = now + DFU_WAKE_RETRY_INTERVAL_US;
+    }
+
+    if (reportedDFUResponses != gTristarDFUResponses){
+        reportedDFUResponses = gTristarDFUResponses;
+        snprintf(buf, sizeof(buf), "[dfu] sent DFU response (%lu)\r\n",
+                 (unsigned long)reportedDFUResponses);
+        tud_cdc_n_write_str(ITF_CONTROL, buf);
+        gDFURetryActive = false;
+    }
+
+    if (gDFURetryActive && now >= gDFURetryDeadline){
+        tud_cdc_n_write_str(ITF_CONTROL, "[dfu] timed out waiting for Tristar query\r\n");
+        gWantTristarReset = false;
+        gWantTristarDFU = false;
+        gDFURetryActive = false;
+    }else if (gDFURetryActive && now >= gNextDFUWakeTime){
+        wakeRetries++;
+        snprintf(buf, sizeof(buf), "[dfu] wake retry %lu; waiting for %s response\r\n",
+                 (unsigned long)wakeRetries,
+                 gWantTristarReset ? "RESET" : "DFU");
+        tud_cdc_n_write_str(ITF_CONTROL, buf);
+        colobus_perform_wake();
+        gNextDFUWakeTime = now + DFU_WAKE_RETRY_INTERVAL_US;
+    }
+
+    tud_cdc_n_write_flush(ITF_CONTROL);
+}
+
 int task_spam(){
     int err = 0;
 
@@ -412,9 +475,7 @@ void colobus_perform_usbliter8(){
   usbmux_configure(kMuxcfg_iphone_to_gpio);
   usb_task_queue_cmd(USB_CMD_WAIT_FOR_DEVICE);
   gUSBLiter8Connected = 1;
-  gWantTristarReset = true;
-  gWantTristarDFU = true;
-  colobus_perform_wake();
+  colobus_begin_dfu();
 }
 
 void myusb_task(){
@@ -485,9 +546,7 @@ void myusb_task(){
       colobus_perform_usbliter8();
     } else if (!strcmp(line, "dfu")){
       tud_cdc_n_write_str(ITF_CONTROL, "entering DFU!\r\n");
-      gWantTristarReset = true;
-      gWantTristarDFU = true;
-      colobus_perform_wake();
+      colobus_begin_dfu();
     } else if (!strcmp(line, "rb")){
       watchdog_reboot(0,0,0);
     } else if (!strcmp(line, "bl")){
@@ -632,13 +691,12 @@ int main(){
                 colobus_perform_wake();
 
             }else if (bpress == kButtonPressTypeLong){
-                if (gWantTristarReset){
+                if (gWantTristarReset || gWantTristarDFU){
                     gWantTristarReset = false;
                     gWantTristarDFU = false;
+                    gDFURetryActive = false;
                 }else{
-                    gWantTristarReset = true;
-                    gWantTristarDFU = true;
-                    colobus_perform_wake();
+                    colobus_begin_dfu();
                 }
             }        
         }
@@ -651,6 +709,7 @@ int main(){
         gpio_put(PIN_LED3, gWantTristarReset);
         
         colobus_wake_runloop();
+        colobus_dfu_retry_task();
         if (gWantDCSDInit){
             if (gWantDCSDInit > 0){
                 dcsd_init();
